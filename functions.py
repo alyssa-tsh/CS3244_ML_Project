@@ -6,7 +6,8 @@
 
 import kagglehub
 from kagglehub import KaggleDatasetAdapter
-from  sklearn.preprocessing import LabelEncoder
+from  sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from category_encoders import TargetEncoder
 import re
 import numpy as np
 import pandas as pd
@@ -15,15 +16,7 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 from sklearn.model_selection import train_test_split
 from itertools import filterfalse
 from sklearn.preprocessing import RobustScaler, QuantileTransformer
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.svm import SVC
+
 from xgboost import XGBClassifier
 
 import matplotlib.pyplot as plt
@@ -69,6 +62,7 @@ def encode_categories(df, col, unknown_label="Unknown", encoders=None):
         encoders[col] = le
   return df, encoders
 
+
 def drop_id_dupes(df):
   df_sorted=df.sort_values('id')
 
@@ -82,15 +76,10 @@ def drop_id_dupes(df):
   return df_dropped.reset_index(drop=True)
 
 def clean_application_records(raw):
-    print('Starting to clean application records')
     raw.columns=raw.columns.str.lower()
     df=raw.copy()
     df.columns = df.columns.str.lower()
 
-    dupes_df = df[df['id'].duplicated(keep=False)].sort_values(by='id')
-    dupes_df = drop_id_dupes(dupes_df)
-    non_dupes = df[~df['id'].duplicated(keep=False)]
-    df = pd.concat([non_dupes, dupes_df], ignore_index=True)
 
     # Children
     df["cnt_children_encoded"] = df["cnt_children"].apply(lambda x: x if x in [0,1,2,3] else 4).astype(int)
@@ -101,7 +90,7 @@ def clean_application_records(raw):
     age_labels = [f"{i}-{i+4}" for i in range(0,90,5)] + ["90+"]
     df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
     df['age_binned'] = pd.Categorical(df['age_binned'], categories=age_labels, ordered=True)
-    df, encoders = encode_categories(df, "age_binned")
+    # df, encoders = encode_categories(df, "age_binned")
 
     # Employment
     df["days_employed"] = np.where(df["days_employed"] >= 0, -1, -df["days_employed"])
@@ -117,18 +106,18 @@ def clean_application_records(raw):
     df["cnt_fam_members_encoded"] = df["cnt_fam_members"].apply(lambda x: x if x in [1,2,3,4,5] else 6).astype(int)
 
     # Encode categorical variables
-    cat_cols = ["name_income_type", "name_education_type", "name_family_status", "name_housing_type"]
-    for col in cat_cols:
-        df, encoders = encode_categories(df, col)
+    # cat_cols = ["name_income_type", "name_education_type", "name_family_status", "name_housing_type"]
+    # for col in cat_cols:
+    #     df, encoders = encode_categories(df, col)
 
     # Occupation type
     df["occupation_type"] = df["occupation_type"].fillna("Unemployed")
-    df, encoders = encode_categories(df, "occupation_type")
+    # df, encoders = encode_categories(df, "occupation_type")
 
     # Binary flags
-    df["gender_encoded"] = df["code_gender"].map({'M':0, 'F':1})
-    df["flag_own_realty_encoded"] = df["flag_own_realty"].map({'Y':1, 'N':0})
-    df["flag_own_car_encoded"] = df["flag_own_car"].map({'Y':1, 'N':0})
+    # df["gender_encoded"] = df["code_gender"].map({'M':0, 'F':1})
+    # df["flag_own_realty_encoded"] = df["flag_own_realty"].map({'Y':1, 'N':0})
+    # df["flag_own_car_encoded"] = df["flag_own_car"].map({'Y':1, 'N':0})
 
     # Income log transform
     df["amt_income_total_log"] = np.log1p(df["amt_income_total"])
@@ -138,12 +127,11 @@ def clean_application_records(raw):
     df.loc[df["employment_status_encoded"]==1, "occupation_type_encoded"] = df.loc[df["employment_status_encoded"]==1, "occupation_type_encoded"].replace(-1,0)
 
     # Drop original object columns
-    print('Dropping object columns')
-    object_cols = df.select_dtypes(include='object').columns
-    df.drop(columns=object_cols, inplace=True)
+    # print('Dropping object columns')
+    # object_cols = df.select_dtypes(include='object').columns
+    # df.drop(columns=object_cols, inplace=True)
     # print(object_cols)
-    print('Completed cleaning raw application records')
-    # Scale numeric columns except binaries and label-encoded categories if needed (to be done later)
+    
     return df
 
 
@@ -238,11 +226,21 @@ def split_credit_dataset(credit_records_raw):
 
   return old_accounts_credit_df, new_accounts_credit_df, old_ids, new_ids
 
-def split_application_dataset(application_records_raw, old_ids, new_ids):
+def split_application_dataset(df, old_ids, new_ids):
   print('Splitting application dataset')
-  application_records_df = clean_application_records(application_records_raw)
-  old_accounts_application = application_records_df[application_records_df['id'].isin(old_ids)]
-  new_accounts_application = application_records_df[application_records_df['id'].isin(new_ids)]
+
+  dupes_df = df[df['id'].duplicated(keep=False)].sort_values(by='id')
+  dupes_df = drop_id_dupes(dupes_df)
+  non_dupes = df[~df['id'].duplicated(keep=False)]
+  df = pd.concat([non_dupes, dupes_df], ignore_index=True)
+  
+  old_accounts_application_df = df[df['id'].isin(old_ids)]
+  new_accounts_application_df = df[df['id'].isin(new_ids)]
+
+  print('Cleaning old application records')
+  old_accounts_application = clean_application_records(old_accounts_application_df)
+  print('Cleaning new application records')
+  new_accounts_application = clean_application_records(new_accounts_application_df)
 
   return old_accounts_application, new_accounts_application
 
