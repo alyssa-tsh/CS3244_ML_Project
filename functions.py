@@ -6,8 +6,7 @@
 
 import kagglehub
 from kagglehub import KaggleDatasetAdapter
-from  sklearn.preprocessing import LabelEncoder, OneHotEncoder
-from category_encoders import TargetEncoder
+from  sklearn.preprocessing import LabelEncoder, OneHotEncoder, TargetEncoder
 import re
 import numpy as np
 import pandas as pd
@@ -16,7 +15,6 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 from sklearn.model_selection import train_test_split
 from itertools import filterfalse
 from sklearn.preprocessing import RobustScaler, QuantileTransformer
-
 from xgboost import XGBClassifier
 
 import matplotlib.pyplot as plt
@@ -80,7 +78,6 @@ def clean_application_records(raw):
     df=raw.copy()
     df.columns = df.columns.str.lower()
 
-
     # Children
     df["cnt_children_encoded"] = df["cnt_children"].apply(lambda x: x if x in [0,1,2,3] else 4).astype(int)
 
@@ -90,7 +87,6 @@ def clean_application_records(raw):
     age_labels = [f"{i}-{i+4}" for i in range(0,90,5)] + ["90+"]
     df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
     df['age_binned'] = pd.Categorical(df['age_binned'], categories=age_labels, ordered=True)
-    # df, encoders = encode_categories(df, "age_binned")
 
     # Employment
     df["days_employed"] = np.where(df["days_employed"] >= 0, -1, -df["days_employed"])
@@ -109,28 +105,24 @@ def clean_application_records(raw):
     # cat_cols = ["name_income_type", "name_education_type", "name_family_status", "name_housing_type"]
     # for col in cat_cols:
     #     df, encoders = encode_categories(df, col)
-
-    # Occupation type
-    df["occupation_type"] = df["occupation_type"].fillna("Unemployed")
     # df, encoders = encode_categories(df, "occupation_type")
+    # df, encoders = encode_categories(df, "age_binned")
 
+    binary_cols = ["code_gender", "flag_own_realty", "flag_own_car"]
     # Binary flags
-    # df["gender_encoded"] = df["code_gender"].map({'M':0, 'F':1})
-    # df["flag_own_realty_encoded"] = df["flag_own_realty"].map({'Y':1, 'N':0})
-    # df["flag_own_car_encoded"] = df["flag_own_car"].map({'Y':1, 'N':0})
+    for col in binary_cols:
+        mapping = {'M':0, 'F':1, 'Y':1, 'N':0}
+        df[col+"_encoded"] = df[col].map(mapping)
 
     # Income log transform
     df["amt_income_total_log"] = np.log1p(df["amt_income_total"])
-
+  # Occupation type
+    df["occupation_type"] = df["occupation_type"].fillna("Unemployed")
     # Employment consistency check
-    df.loc[df["employment_status_encoded"]==0, "occupation_type_encoded"] = -1
-    df.loc[df["employment_status_encoded"]==1, "occupation_type_encoded"] = df.loc[df["employment_status_encoded"]==1, "occupation_type_encoded"].replace(-1,0)
-
-    # Drop original object columns
-    # print('Dropping object columns')
-    # object_cols = df.select_dtypes(include='object').columns
-    # df.drop(columns=object_cols, inplace=True)
-    # print(object_cols)
+    df["occupation_type"] = df.apply(
+      lambda row: "No Occupation" if row["employment_status_encoded"] == 0 else row["occupation_type"],
+      axis=1
+    )
     
     return df
 
@@ -227,7 +219,6 @@ def split_credit_dataset(credit_records_raw):
   return old_accounts_credit_df, new_accounts_credit_df, old_ids, new_ids
 
 def split_application_dataset(df, old_ids, new_ids):
-  print('Splitting application dataset')
 
   dupes_df = df[df['id'].duplicated(keep=False)].sort_values(by='id')
   dupes_df = drop_id_dupes(dupes_df)
@@ -237,12 +228,7 @@ def split_application_dataset(df, old_ids, new_ids):
   old_accounts_application_df = df[df['id'].isin(old_ids)]
   new_accounts_application_df = df[df['id'].isin(new_ids)]
 
-  print('Cleaning old application records')
-  old_accounts_application = clean_application_records(old_accounts_application_df)
-  print('Cleaning new application records')
-  new_accounts_application = clean_application_records(new_accounts_application_df)
-
-  return old_accounts_application, new_accounts_application
+  return old_accounts_application_df, new_accounts_application_df
 
 
 # In[8]:
@@ -274,8 +260,6 @@ def create_target(df, weights=None, scaling_method = 'quantile'):
       scaler = QuantileTransformer(output_distribution='uniform')
       for metric in metrics:
           df[f'{metric}_scaled'] = scaler.fit_transform(df[[metric]])
-
-
 
     df['composite_risk_score'] = sum(df[f'{metric}_scaled'] * weight
                                      for metric, weight in weights.items())
@@ -341,7 +325,8 @@ def X_y_split(train, test, target_col='label'):
 def data_pipeline():
   print('Loading data')
   application_records_raw, credit_records_raw = load_data()
-  print('Splitting data')
+
+  print('Splitting credits data')
   old_accounts_credit_df, new_accounts_credit_df, old_ids, new_ids = split_credit_dataset(credit_records_raw)
   # Cleaning credit records to get respective columns required for target engineering
   print(f'Cleaning old accounts credit records - [Length: {old_accounts_credit_df.shape[0]}]')
@@ -350,13 +335,41 @@ def data_pipeline():
   new_accounts_credit = clean_credit_records(new_accounts_credit_df)
   print('Cleaning credit data completed')
 
+  print('Splitting applications data')
   old_accounts_application_df, new_accounts_application_df = split_application_dataset(application_records_raw, old_ids, new_ids)
+  print('Cleaning old application records')
+  old_accounts_application = clean_application_records(old_accounts_application_df)
+  print('Cleaning new application records')
+  new_accounts_application = clean_application_records(new_accounts_application_df)
 
   print('Merging data')
-  merged_train, merged_test = merge_data(old_accounts_credit, new_accounts_credit, old_accounts_application_df, new_accounts_application_df)
+  merged_train, merged_test = merge_data(old_accounts_credit, new_accounts_credit, old_accounts_application, new_accounts_application)
   print(merged_train.info())
   print(merged_test.info())
 
   print('Final train and test processing completed generated successfully')
   return merged_train, merged_test
 
+
+# def data_pipeline_svc():
+#   print('Loading data')
+#   application_records_raw, credit_records_raw = load_data()
+#   print('Splitting data')
+#   old_accounts_credit_df, new_accounts_credit_df, old_ids, new_ids = split_credit_dataset(credit_records_raw)
+#   # Cleaning credit records to get respective columns required for target engineering
+#   print(f'Cleaning old accounts credit records - [Length: {old_accounts_credit_df.shape[0]}]')
+#   old_accounts_credit = clean_credit_records(old_accounts_credit_df)
+#   print(f'Cleaning new accounts credit records - [Length: {new_accounts_credit_df.shape[0]}]')
+#   new_accounts_credit = clean_credit_records(new_accounts_credit_df)
+#   print('Cleaning credit data completed')
+
+#   print('Splitting applications data')
+#   old_accounts_application_df, new_accounts_application_df = split_application_dataset(application_records_raw, old_ids, new_ids)
+  
+#   print('Merging data')
+#   merged_train, merged_test = merge_data(old_accounts_credit, new_accounts_credit, old_accounts_application_df, new_accounts_application_df)
+#   print(merged_train.info())
+#   print(merged_test.info())
+
+#   print('Final train and test processing completed generated successfully')
+#   return merged_train, merged_test
