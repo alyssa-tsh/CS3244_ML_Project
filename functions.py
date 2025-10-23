@@ -43,21 +43,32 @@ def load_data():
 
 
 # application record clean functions
-def encode_categories(df, col, unknown_label="Unknown", encoders=None):
+def encode_categories(df, col, model_name, unknown_label="Unknown", encoders=None):
   df[col] = df[col].astype(str)
-  known_mask = df[col]!=unknown_label
 
-  le=LabelEncoder()
-  le.fit(df.loc[known_mask,col])
+  if model_name in ["SVC", "KNN"]:
+        # One-Hot Encoding
+        ohe = OneHotEncoder(handle_unknown='ignore', sparse=False)
+        ohe_fit = ohe.fit(df[[col]])
+        ohe_cols = [f"{col}_{cat}" for cat in ohe_fit.categories_[0]]
+        encoded = pd.DataFrame(ohe_fit.transform(df[[col]]), columns=ohe_cols, index=df.index)
+        df = pd.concat([df, encoded], axis=1)
+        
+        if encoders is not None:
+            encoders[col] = ohe_fit
 
-  encoded=pd.Series(-1, index=df.index)
-  encoded[known_mask]=le.transform(df.loc[known_mask,col])
+  elif model_name == "XGB":
+      # Label Encoding
+      known_mask = df[col] != unknown_label
+      le = LabelEncoder()
+      le.fit(df.loc[known_mask, col])
+      encoded = pd.Series(-1, index=df.index)
+      encoded[known_mask] = le.transform(df.loc[known_mask, col])
+      df[col + "_encoded"] = encoded
+      
+      if encoders is not None:
+          encoders[col] = le
 
-  df[col+"_encoded"]=encoded
-
-  # store encoded values for decoding alter on
-  if encoders is not None:
-        encoders[col] = le
   return df, encoders
 
 
@@ -67,13 +78,13 @@ def drop_id_dupes(df):
   def keep_row(id):
     notna = id[id['occupation_type'].notna()]
     if not notna.empty:
-      return notna.iloc[[0]] #keep first dup
+      return notna.iloc[[0]] 
     else:
-      return id.iloc[[0]] #if everything is NaN, just keep first
+      return id.iloc[[0]] 
   df_dropped=df_sorted.groupby('id', group_keys=False).apply(keep_row)
   return df_dropped.reset_index(drop=True)
 
-def clean_application_records(raw):
+def clean_application_records(raw, model_name):
     raw.columns=raw.columns.str.lower()
     df=raw.copy()
     df.columns = df.columns.str.lower()
@@ -101,12 +112,12 @@ def clean_application_records(raw):
     df["cnt_fam_members"] = df["cnt_fam_members"].astype(int)
     df["cnt_fam_members_encoded"] = df["cnt_fam_members"].apply(lambda x: x if x in [1,2,3,4,5] else 6).astype(int)
 
-    # Encode categorical variables
-    # cat_cols = ["name_income_type", "name_education_type", "name_family_status", "name_housing_type"]
-    # for col in cat_cols:
-    #     df, encoders = encode_categories(df, col)
-    # df, encoders = encode_categories(df, "occupation_type")
-    # df, encoders = encode_categories(df, "age_binned")
+    #Encode categorical variables
+    cat_cols = ["name_income_type", "name_education_type", "name_family_status", "name_housing_type"]
+    for col in cat_cols:
+        df, encoders = encode_categories(df, col, model_name)
+    df, encoders = encode_categories(df, "occupation_type", model_name)
+    df, encoders = encode_categories(df, "age_binned", model_name)
 
     binary_cols = ["code_gender", "flag_own_realty", "flag_own_car"]
     # Binary flags
@@ -123,7 +134,9 @@ def clean_application_records(raw):
       lambda row: "No Occupation" if row["employment_status_encoded"] == 0 else row["occupation_type"],
       axis=1
     )
-    
+
+    df.drop(columns=df.select_dtypes(include=['object']).columns, inplace=True)
+
     return df
 
 
@@ -219,7 +232,7 @@ def split_credit_dataset(credit_records_raw):
   return old_accounts_credit_df, new_accounts_credit_df, old_ids, new_ids
 
 def split_application_dataset(df, old_ids, new_ids):
-
+  df.columns = df.columns.str.lower()
   dupes_df = df[df['id'].duplicated(keep=False)].sort_values(by='id')
   dupes_df = drop_id_dupes(dupes_df)
   non_dupes = df[~df['id'].duplicated(keep=False)]
@@ -322,7 +335,7 @@ def X_y_split(train, test, target_col='label'):
 # In[13]:
 
 
-def data_pipeline():
+def data_pipeline(model_name):
   print('Loading data')
   application_records_raw, credit_records_raw = load_data()
 
@@ -338,9 +351,9 @@ def data_pipeline():
   print('Splitting applications data')
   old_accounts_application_df, new_accounts_application_df = split_application_dataset(application_records_raw, old_ids, new_ids)
   print('Cleaning old application records')
-  old_accounts_application = clean_application_records(old_accounts_application_df)
+  old_accounts_application = clean_application_records(old_accounts_application_df, model_name)
   print('Cleaning new application records')
-  new_accounts_application = clean_application_records(new_accounts_application_df)
+  new_accounts_application = clean_application_records(new_accounts_application_df, model_name)
 
   print('Merging data')
   merged_train, merged_test = merge_data(old_accounts_credit, new_accounts_credit, old_accounts_application, new_accounts_application)
