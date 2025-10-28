@@ -25,6 +25,10 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.svm import SVC
 from xgboost import XGBClassifier
+from imblearn.over_sampling import SMOTE
+from imblearn.combine import SMOTETomek
+from imblearn.under_sampling import ClusterCentroids
+
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -52,22 +56,62 @@ def load_data():
 
 
 # application record clean functions
-def encode_categories(df, col, unknown_label="Unknown", encoders=None):
-  df[col] = df[col].astype(str)
-  known_mask = df[col]!=unknown_label
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+import pandas as pd
+import numpy as np
 
-  le=LabelEncoder()
-  le.fit(df.loc[known_mask,col])
+def encode_categories(df, col, encoding="label", unknown_label="Unknown", encoders=None):
+    """
+    Encodes or converts categorical columns.
 
-  encoded=pd.Series(-1, index=df.index)
-  encoded[known_mask]=le.transform(df.loc[known_mask,col])
+    Parameters:
+    - df: DataFrame
+    - col: column name to process
+    - encoding: 'label', 'onehot', 'categorical', or 'none'
+    - unknown_label: label for missing/unknown values
+    - encoders: optional dictionary to store fitted encoders
 
-  df[col+"_encoded"]=encoded
+    Returns:
+    - df (updated)
+    - encoders (updated or None)
+    """
+    df[col] = df[col].astype(str).fillna(unknown_label)
 
-  # store encoded values for decoding alter on
-  if encoders is not None:
+    if encoders is None:
+        encoders = {}
+
+    # Skip encoding if requested
+    if encoding == "none":
+        return df, encoders
+
+    if encoding == "label":
+        le = LabelEncoder()
+        known_mask = df[col] != unknown_label
+        le.fit(df.loc[known_mask, col])
+        encoded = pd.Series(-1, index=df.index)
+        encoded[known_mask] = le.transform(df.loc[known_mask, col])
+        df[col + "_encoded"] = encoded.astype(int)
         encoders[col] = le
-  return df, encoders
+
+    elif encoding == "onehot":
+        ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+        onehot_arr = ohe.fit_transform(df[[col]])
+        onehot_df = pd.DataFrame(
+            onehot_arr,
+            columns=[f"{col}_{cat}" for cat in ohe.categories_[0]],
+            index=df.index
+        )
+        df = pd.concat([df, onehot_df], axis=1)
+        encoders[col] = ohe
+
+    elif encoding == "categorical":
+        # Convert to pandas Categorical dtype
+        df[col] = df[col].astype("category")
+        # Optional: store categories for reference
+        encoders[col] = df[col].cat.categories.tolist()
+
+    return df, encoders
+
 
 def drop_id_dupes(df):
   df_sorted=df.sort_values('id')
@@ -81,12 +125,16 @@ def drop_id_dupes(df):
   df_dropped=df_sorted.groupby('id', group_keys=False).apply(keep_row)
   return df_dropped.reset_index(drop=True)
 
-def clean_application_records(raw):
-    print('Starting to clean application records')
-    raw.columns=raw.columns.str.lower()
-    df=raw.copy()
+def clean_application_records(raw, encode=False, encoding_type="label"):
+    """
+    Cleans raw application records.
+    Supports flexible encoding options ('label', 'onehot', 'categorical', 'none').
+    """
+
+    df = raw.copy()
     df.columns = df.columns.str.lower()
 
+    # Handle duplicates
     dupes_df = df[df['id'].duplicated(keep=False)].sort_values(by='id')
     dupes_df = drop_id_dupes(dupes_df)
     non_dupes = df[~df['id'].duplicated(keep=False)]
@@ -101,7 +149,6 @@ def clean_application_records(raw):
     age_labels = [f"{i}-{i+4}" for i in range(0,90,5)] + ["90+"]
     df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
     df['age_binned'] = pd.Categorical(df['age_binned'], categories=age_labels, ordered=True)
-    df, encoders = encode_categories(df, "age_binned")
 
     # Employment
     df["days_employed"] = np.where(df["days_employed"] >= 0, -1, -df["days_employed"])
@@ -109,42 +156,46 @@ def clean_application_records(raw):
     df["months_employed"] = np.where(df["months_employed"] >= 0, df["months_employed"], -1)
     df["years_employed"] = (df["days_employed"]/365).round(0).astype(int)
     df["years_employed"] = np.where(df["years_employed"] >= 0, df["years_employed"], -1)
-
     df["employment_status_encoded"] = np.where(df["days_employed"]<0, 1, 0)
 
     # Family size
     df["cnt_fam_members"] = df["cnt_fam_members"].astype(int)
     df["cnt_fam_members_encoded"] = df["cnt_fam_members"].apply(lambda x: x if x in [1,2,3,4,5] else 6).astype(int)
 
-    # Encode categorical variables
-    cat_cols = ["name_income_type", "name_education_type", "name_family_status", "name_housing_type"]
-    for col in cat_cols:
-        df, encoders = encode_categories(df, col)
-
-    # Occupation type
-    df["occupation_type"] = df["occupation_type"].fillna("Unemployed")
-    df, encoders = encode_categories(df, "occupation_type")
-
     # Binary flags
     df["gender_encoded"] = df["code_gender"].map({'M':0, 'F':1})
     df["flag_own_realty_encoded"] = df["flag_own_realty"].map({'Y':1, 'N':0})
     df["flag_own_car_encoded"] = df["flag_own_car"].map({'Y':1, 'N':0})
 
-    # Income log transform
+    # Income
     df["amt_income_total_log"] = np.log1p(df["amt_income_total"])
 
-    # Employment consistency check
-    df.loc[df["employment_status_encoded"]==0, "occupation_type_encoded"] = -1
-    df.loc[df["employment_status_encoded"]==1, "occupation_type_encoded"] = df.loc[df["employment_status_encoded"]==1, "occupation_type_encoded"].replace(-1,0)
+    
+    df["occupation_type"] = df["occupation_type"].fillna("Unemployed")
 
-    # Drop original object columns
-    print('Dropping object columns')
-    object_cols = df.select_dtypes(include='object').columns
-    df.drop(columns=object_cols, inplace=True)
-    # print(object_cols)
+    # List of categorical columns
+    cat_cols = ["name_income_type", "name_education_type", "name_family_status",
+                "name_housing_type", "occupation_type", "age_binned"]
+
+    encoders = {}
+
+    if encode:
+        for col in cat_cols:
+            df, encoders = encode_categories(df, col, encoding=encoding_type, encoders=encoders)
+    else:
+        # Default to categorical dtype conversion
+        for col in cat_cols:
+            df, encoders = encode_categories(df, col, encoding="categorical", encoders=encoders)
+
+    
+    if encode and encoding_type in ["label", "onehot"]:
+        print('Dropping object columns')
+        object_cols = df.select_dtypes(include='object').columns
+        df.drop(columns=object_cols, inplace=True)
+
     print('Completed cleaning raw application records')
-    # Scale numeric columns except binaries and label-encoded categories if needed (to be done later)
-    return df
+    return df, encoders
+
 
 
 # In[ ]:
@@ -240,7 +291,7 @@ def split_credit_dataset(credit_records_raw):
 
 def split_application_dataset(application_records_raw, old_ids, new_ids):
   print('Splitting application dataset')
-  application_records_df = clean_application_records(application_records_raw)
+  application_records_df = application_records_raw.copy()
   old_accounts_application = application_records_df[application_records_df['id'].isin(old_ids)]
   new_accounts_application = application_records_df[application_records_df['id'].isin(new_ids)]
 
@@ -365,22 +416,44 @@ def X_y_split(train, test, target_col='label'):
 #                    'amt_income_total_log',
 #                    'risk_score']
 
+# def scaling_std(X_train, X_test, numeric_columns, ScalerType):
+#   X_train_scaled = X_train.copy()
+#   X_test_scaled = X_test.copy()
+
+#   scaler=ScalerType()
+
+#   X_train_numeric = X_train.loc[:,numeric_columns]
+#   scaled_train_data = scaler.fit_transform(X_train_numeric)
+#   X_test_numeric = X_test.loc[:,numeric_columns]
+#   scaled_test_data = scaler.transform(X_test_numeric)
+
+#   X_train_scaled[numeric_columns]=scaled_train_data
+#   X_test_scaled[numeric_columns]=scaled_test_data
+
+#   X_train_scaled = X_train_scaled.drop('id', axis=1)
+#   X_test_scaled = X_test_scaled.drop('id', axis=1)
+
+#   return X_train_scaled, X_test_scaled
+
 def scaling_std(X_train, X_test, numeric_columns, ScalerType):
   X_train_scaled = X_train.copy()
   X_test_scaled = X_test.copy()
 
-  scaler=ScalerType()
+  # Drop 'id' before scaling
+  if 'id' in X_train_scaled.columns:
+      X_train_scaled = X_train_scaled.drop('id', axis=1)
+  if 'id' in X_test_scaled.columns:
+      X_test_scaled = X_test_scaled.drop('id', axis=1)
 
-  X_train_numeric = X_train.loc[:,numeric_columns]
-  scaled_train_data = scaler.fit_transform(X_train_numeric)
-  X_test_numeric = X_test.loc[:,numeric_columns]
-  scaled_test_data = scaler.transform(X_test_numeric)
+  scaler = ScalerType()
 
-  X_train_scaled[numeric_columns]=scaled_train_data
-  X_test_scaled[numeric_columns]=scaled_test_data
-
-  X_train_scaled = X_train_scaled.drop('id', axis=1)
-  X_test_scaled = X_test_scaled.drop('id', axis=1)
+  # Use .loc with column names
+  X_train_scaled[numeric_columns] = scaler.fit_transform(
+      X_train_scaled[numeric_columns]
+  )
+  X_test_scaled[numeric_columns] = scaler.transform(
+      X_test_scaled[numeric_columns]
+  )
 
   return X_train_scaled, X_test_scaled
 
@@ -419,7 +492,7 @@ def oversampling_methods(X_train, y_train, random_state=42):
 # In[ ]:
 
 
-def data_pipeline():
+def data_pipeline(encode_flag, encode_type):
   print('Loading data')
   application_records_raw, credit_records_raw = load_data()
   print('Splitting data')
@@ -431,7 +504,13 @@ def data_pipeline():
   new_accounts_credit = clean_credit_records(new_accounts_credit_df)
   print('Cleaning credit data completed')
 
+
   old_accounts_application_df, new_accounts_application_df = split_application_dataset(application_records_raw, old_ids, new_ids)
+  print(f'Cleaning old accounts application records - [Length: {old_accounts_application_df.shape[0]}]')
+  old_accounts_application_df = clean_application_records(old_accounts_application_df, encoding=encode_flag, encoding_type=encode_type)
+  print('Cleaning new accounts appplication records, - [Length: {new_accounts_application_df.shape[0]}]')
+  new_accounts_application_df = clean_application_records(new_accounts_application_df, encoding=encode_flag, encoding_type=encode_type)
+
 
   print('Merging data')
   merged_train, merged_test = merge_data(old_accounts_credit, new_accounts_credit, old_accounts_application_df, new_accounts_application_df)
@@ -441,7 +520,6 @@ def data_pipeline():
   X_train, y_train, X_test, y_test = X_y_split(merged_train, merged_test, target_col='label')
 
   numeric_columns = ['cnt_children',
-                    'cnt_fam_members',
                     'age',
                     'months_employed',
                     'amt_income_total_log',
@@ -449,17 +527,22 @@ def data_pipeline():
 
   X_train_smote, y_train_smote, X_train_smotetomek, y_train_smotetomek, X_train_cc, y_train_cc = oversampling_methods(X_train, y_train)
 
-  X_train_smote_std, X_test_std = scaling_std(
-    X_train, X_test, numeric_columns, StandardScaler)
+  # FIRST: Scale original train and test (this is your reference scaler)
+  X_train_std, X_test_std = scaling_std(
+      X_train, X_test, numeric_columns, StandardScaler)
+
+  # THEN: Apply resampling to ORIGINAL X_train (before scaling)
+  X_train_smote, y_train_smote, X_train_smotetomek, y_train_smotetomek, X_train_cc, y_train_cc = oversampling_methods(X_train, y_train)
+
+  # FINALLY: Scale each resampled training set independently (no need to re-scale test)
+  X_train_smote_std, _ = scaling_std(
+      X_train_smote, X_test, numeric_columns, StandardScaler)
 
   X_train_smotetomek_std, _ = scaling_std(
-    X_train, X_test, numeric_columns, StandardScaler)
+      X_train_smotetomek, X_test, numeric_columns, StandardScaler)
 
   X_train_cc_std, _ = scaling_std(
-    X_train, X_test, numeric_columns, StandardScaler)
-
-  X_train_std, _ = scaling_std(
-    X_train, X_test, numeric_columns, StandardScaler)
+      X_train_cc, X_test, numeric_columns, StandardScaler)
 
   print('Final train and test processing completed generated successfully')
   return X_train_std, y_train, X_train_smote_std, y_train_smote, X_train_smotetomek_std, y_train_smotetomek, X_train_cc_std, y_train_cc, X_test_std, y_test
