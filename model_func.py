@@ -5,53 +5,36 @@ from sklearn.preprocessing import (
     OneHotEncoder, OrdinalEncoder, FunctionTransformer
 )
 from sklearn.pipeline import Pipeline
+from sklearn.model_selection import StratifiedKFold
 from sklearn.compose import ColumnTransformer
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from xgboost import XGBClassifier
 from sklearn.feature_selection import SelectKBest, mutual_info_classif, RFE, SelectFromModel
 
-# ------------------------------------------------------------
-# Column Dictionarys
-# ------------------------------------------------------------
-
-numeric_cols = ["age", "cnt_children", "amt_income_total_log", "risk_score", "months_employed"]
-
 
 # ------------------------------------------------------------
-# 1. Build Transformer
-# ------------------------------------------------------------
-def build_transformer():
-    
-    transformers=[
-            ("num", StandardScaler(), numeric_cols)
-        ]
-
-    preprocessor = ColumnTransformer(transformers, remainder='passthrough')
-    
-    return preprocessor
-# ------------------------------------------------------------
-# 2. Drop Correlated Features
+# Drop Correlated Features
 # ------------------------------------------------------------
 # def drop_correlated_features(model_name, col_dic=column_dic):
-drop_cols = ["days_birth", "amt_income_total", "years_employed", "flag_mobil", "code_gender", "flag_own_realty", "flag_own_car", "cnt_fam_members"]
+drop_cols = ["days_birth", "amt_income_total", "years_employed", "days_employed", "age_binned"]
     # if model_name in ["SVC", "KNN"]:
     #     drop_cols.extend(["cnt_children", "cnt_fam_members"])
     #     drop_cols.extend
     # return drop_cols
 
 # ------------------------------------------------------------
-# 3. Feature Selection Model
+# Feature Selection Method
 # ------------------------------------------------------------
 def build_feature_selector(model_name):
     if model_name=="SVC":
         return RFE(SVC(kernel='linear'), n_features_to_select=None, step=0.2, importance_getter='feature_importances_')
     elif model_name=="XGB":
-        return SelectFromModel(XGBClassifier(use_label_encoder=False, eval_metric="logloss", random_state=42), threshold='median')
+        return SelectFromModel(XGBClassifier(eval_metric="logloss", random_state=42), threshold='median')
     elif model_name=="KNN":
         return SelectKBest(score_func=mutual_info_classif, k=10)
 # ------------------------------------------------------------
-# 4. Build Model
+# Build Model
 # ------------------------------------------------------------
 def build_model(model_name):
     if model_name == "SVC":

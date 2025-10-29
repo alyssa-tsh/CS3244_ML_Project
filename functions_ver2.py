@@ -60,57 +60,116 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import pandas as pd
 import numpy as np
 
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+import pandas as pd
+
 def encode_categories(df, col, encoding="label", unknown_label="Unknown", encoders=None):
     """
-    Encodes or converts categorical columns.
+    Encodes or converts a categorical column in a train/test-safe way.
+    
+    Parameters:
+    - df: pandas DataFrame
+    - col: column name
+    - encoding: 'label', 'onehot', 'categorical', or 'none'
+    - unknown_label: value to fill missing or unknowns
+    - encoders: dict storing fitted encoders for reuse (train -> test)
+    
+    Returns:
+    - df: updated DataFrame with new encoded columns
+    - encoders: updated encoders dictionary
+    """
+    if encoders is None:
+        encoders = {}
+
+    # Ensure column is string and fill missing
+    df[col] = df[col].astype(str).fillna(unknown_label)
+
+    if encoding == "none":
+        return df, encoders
+
+    # -------------------------
+    # Label encoding
+    # -------------------------
+    if encoding == "label":
+        known_mask = df[col] != unknown_label
+
+        if col in encoders:
+            le = encoders[col]  # use fitted encoder
+        else:
+            le = LabelEncoder()
+            le.fit(df.loc[known_mask, col])
+            encoders[col] = le
+
+        encoded = pd.Series(-1, index=df.index)
+        encoded[known_mask] = le.transform(df.loc[known_mask, col])
+        df[col + "_encoded"] = encoded.astype(int)
+
+    # -------------------------
+    # One-hot encoding
+    # -------------------------
+    elif encoding == "onehot":
+        if col in encoders:
+            ohe = encoders[col]
+            onehot_arr = ohe.transform(df[[col]])
+        else:
+            ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+            onehot_arr = ohe.fit_transform(df[[col]])
+            encoders[col] = ohe
+
+        onehot_df = pd.DataFrame(
+            onehot_arr,
+            columns=[f"{col}_{cat}" for cat in encoders[col].categories_[0]],
+            index=df.index
+        )
+        df = pd.concat([df, onehot_df], axis=1)
+
+    # -------------------------
+    # Pandas categorical type
+    # -------------------------
+    elif encoding == "categorical":
+        df[col] = df[col].astype("category")
+        if col not in encoders:
+            encoders[col] = df[col].cat.categories.tolist()
+
+    return df, encoders
+
+
+def encode_application_records(df, encoding_type="label", encoders=None):
+    """
+    Encodes all categorical columns in the application records.
+    Automatically reuses encoders if provided (for test data).
 
     Parameters:
-    - df: DataFrame
-    - col: column name to process
-    - encoding: 'label', 'onehot', 'categorical', or 'none'
-    - unknown_label: label for missing/unknown values
-    - encoders: optional dictionary to store fitted encoders
-
+    - df: pandas DataFrame
+    - encoding_type: 'label', 'onehot', 'categorical', or 'none'
+    - encoders: dict of fitted encoders to reuse (optional)
+    
     Returns:
-    - df (updated)
-    - encoders (updated or None)
+    - df: DataFrame with encoded columns
+    - encoders: updated encoders dictionary
     """
-    df[col] = df[col].astype(str).fillna(unknown_label)
+    categorical_cols = [
+        "name_income_type",
+        "name_education_type",
+        "name_family_status",
+        "name_housing_type",
+        "occupation_type"
+    ]
 
     if encoders is None:
         encoders = {}
 
-    # Skip encoding if requested
-    if encoding == "none":
-        return df, encoders
-
-    if encoding == "label":
-        le = LabelEncoder()
-        known_mask = df[col] != unknown_label
-        le.fit(df.loc[known_mask, col])
-        encoded = pd.Series(-1, index=df.index)
-        encoded[known_mask] = le.transform(df.loc[known_mask, col])
-        df[col + "_encoded"] = encoded.astype(int)
-        encoders[col] = le
-
-    elif encoding == "onehot":
-        ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-        onehot_arr = ohe.fit_transform(df[[col]])
-        onehot_df = pd.DataFrame(
-            onehot_arr,
-            columns=[f"{col}_{cat}" for cat in ohe.categories_[0]],
-            index=df.index
+    for col in categorical_cols:
+        df, encoders = encode_categories(
+            df,
+            col,
+            encoding=encoding_type,
+            encoders=encoders
         )
-        df = pd.concat([df, onehot_df], axis=1)
-        encoders[col] = ohe
-
-    elif encoding == "categorical":
-        # Convert to pandas Categorical dtype
-        df[col] = df[col].astype("category")
-        # Optional: store categories for reference
-        encoders[col] = df[col].cat.categories.tolist()
+    df.drop(columns=categorical_cols, inplace=True)
 
     return df, encoders
+
 
 
 def drop_id_dupes(df):
@@ -125,7 +184,7 @@ def drop_id_dupes(df):
   df_dropped=df_sorted.groupby('id', group_keys=False).apply(keep_row)
   return df_dropped.reset_index(drop=True)
 
-def clean_application_records(raw, encode=False, encoding_type="label"):
+def clean_application_records(raw):
     """
     Cleans raw application records.
     Supports flexible encoding options ('label', 'onehot', 'categorical', 'none').
@@ -140,8 +199,12 @@ def clean_application_records(raw, encode=False, encoding_type="label"):
     non_dupes = df[~df['id'].duplicated(keep=False)]
     df = pd.concat([non_dupes, dupes_df], ignore_index=True)
 
+    # ordinal encoding for cnt childen, age_binned and family size
     # Children
     df["cnt_children_encoded"] = df["cnt_children"].apply(lambda x: x if x in [0,1,2,3] else 4).astype(int)
+    # Family size
+    df["cnt_fam_members"] = df["cnt_fam_members"].astype(int)
+    df["cnt_fam_members_encoded"] = df["cnt_fam_members"].apply(lambda x: x if x in [1,2,3,4,5] else 6).astype(int)
 
     # Age
     df["age"] = (-df["days_birth"] / 365).round(0).astype(int)
@@ -149,6 +212,8 @@ def clean_application_records(raw, encode=False, encoding_type="label"):
     age_labels = [f"{i}-{i+4}" for i in range(0,90,5)] + ["90+"]
     df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
     df['age_binned'] = pd.Categorical(df['age_binned'], categories=age_labels, ordered=True)
+    df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
+    df['age_binned_encoded'] = df['age_binned'].cat.codes
 
     # Employment
     df["days_employed"] = np.where(df["days_employed"] >= 0, -1, -df["days_employed"])
@@ -158,56 +223,26 @@ def clean_application_records(raw, encode=False, encoding_type="label"):
     df["years_employed"] = np.where(df["years_employed"] >= 0, df["years_employed"], -1)
     df["employment_status_encoded"] = np.where(df["days_employed"]<0, 1, 0)
 
-    # Family size
-    df["cnt_fam_members"] = df["cnt_fam_members"].astype(int)
-    df["cnt_fam_members_encoded"] = df["cnt_fam_members"].apply(lambda x: x if x in [1,2,3,4,5] else 6).astype(int)
 
     # Binary flags
     df["gender_encoded"] = df["code_gender"].map({'M':0, 'F':1})
     df["flag_own_realty_encoded"] = df["flag_own_realty"].map({'Y':1, 'N':0})
     df["flag_own_car_encoded"] = df["flag_own_car"].map({'Y':1, 'N':0})
 
+    df.drop(columns=["code_gender", "flag_own_realty", "flag_own_car", "age_binned"], inplace=True)
+
     # Income
     df["amt_income_total_log"] = np.log1p(df["amt_income_total"])
-
-    
     df["occupation_type"] = df["occupation_type"].fillna("Unemployed")
-
-    # List of categorical columns
-    cat_cols = ["name_income_type", "name_education_type", "name_family_status",
-                "name_housing_type", "occupation_type", "age_binned"]
-
-    encoders = {}
-
-    if encode:
-        for col in cat_cols:
-            df, encoders = encode_categories(df, col, encoding=encoding_type, encoders=encoders)
-    else:
-        # Default to categorical dtype conversion
-        for col in cat_cols:
-            df, encoders = encode_categories(df, col, encoding="categorical", encoders=encoders)
-
     
-    if encode and encoding_type in ["label", "onehot"]:
-        print('Dropping object columns')
-        object_cols = df.select_dtypes(include='object').columns
-        df.drop(columns=object_cols, inplace=True)
-
-    print('Completed cleaning raw application records')
-    return df, encoders
-
-
-
-# In[ ]:
-
+    return df
 
 # clean credit records
 def weighted_default_prop_decay(group, decay=0.1):
-
-    group = group.sort_values('months_balance', ascending=True)
-    weights = np.exp(-decay * np.abs(group['months_balance']))
-    weighted_avg = np.sum(group['default_flag'] * weights) / np.sum(weights)
-    return weighted_avg
+    weights = np.array([np.exp(-decay * i) for i in range(len(group)-1, -1, -1)])
+    weighted_defaults = (group['default_flag'] * weights).sum()
+    total_weights = weights.sum()
+    return weighted_defaults / total_weights if total_weights != 0 else 0
 
 
 def clean_credit_records(df):
@@ -292,6 +327,7 @@ def split_credit_dataset(credit_records_raw):
 def split_application_dataset(application_records_raw, old_ids, new_ids):
   print('Splitting application dataset')
   application_records_df = application_records_raw.copy()
+  application_records_df.columns = application_records_df.columns.str.lower()
   old_accounts_application = application_records_df[application_records_df['id'].isin(old_ids)]
   new_accounts_application = application_records_df[application_records_df['id'].isin(new_ids)]
 
@@ -492,7 +528,7 @@ def oversampling_methods(X_train, y_train, random_state=42):
 # In[ ]:
 
 
-def data_pipeline(encode_flag, encode_type):
+def data_pipeline(encode_type):
   print('Loading data')
   application_records_raw, credit_records_raw = load_data()
   print('Splitting data')
@@ -506,11 +542,15 @@ def data_pipeline(encode_flag, encode_type):
 
 
   old_accounts_application_df, new_accounts_application_df = split_application_dataset(application_records_raw, old_ids, new_ids)
-  print(f'Cleaning old accounts application records - [Length: {old_accounts_application_df.shape[0]}]')
-  old_accounts_application_df = clean_application_records(old_accounts_application_df, encoding=encode_flag, encoding_type=encode_type)
-  print('Cleaning new accounts appplication records, - [Length: {new_accounts_application_df.shape[0]}]')
-  new_accounts_application_df = clean_application_records(new_accounts_application_df, encoding=encode_flag, encoding_type=encode_type)
-
+  print(f'Cleaning old accounts application records - [Length: {old_accounts_application_df.shape}]')
+  old_accounts_application_df =  clean_application_records(old_accounts_application_df)
+  print(f'Cleaning new accounts appplication records, - [Length: {new_accounts_application_df.shape}]')
+  new_accounts_application_df = clean_application_records(new_accounts_application_df)
+  print('Encoding')
+  old_accounts_application_df, encoders = encode_application_records(old_accounts_application_df, encoding_type=encode_type)
+  new_accounts_application_df, _ = encode_application_records(new_accounts_application_df, encoding_type=encode_type, encoders=encoders)
+  print(f"Encoders: {encoders}")
+  print('Encoding type:', encode_type)
 
   print('Merging data')
   merged_train, merged_test = merge_data(old_accounts_credit, new_accounts_credit, old_accounts_application_df, new_accounts_application_df)
@@ -524,25 +564,26 @@ def data_pipeline(encode_flag, encode_type):
                     'months_employed',
                     'amt_income_total_log',
                     'risk_score']
-
+  
   X_train_smote, y_train_smote, X_train_smotetomek, y_train_smotetomek, X_train_cc, y_train_cc = oversampling_methods(X_train, y_train)
+  print('Oversampling on original X_train, y_train started')
 
   # FIRST: Scale original train and test (this is your reference scaler)
   X_train_std, X_test_std = scaling_std(
       X_train, X_test, numeric_columns, StandardScaler)
 
   # THEN: Apply resampling to ORIGINAL X_train (before scaling)
-  X_train_smote, y_train_smote, X_train_smotetomek, y_train_smotetomek, X_train_cc, y_train_cc = oversampling_methods(X_train, y_train)
+  X_train_smote_std, y_train_smote, X_train_smotetomek_std, y_train_smotetomek, X_train_cc_std, y_train_cc = oversampling_methods(X_train_std, y_train)
 
   # FINALLY: Scale each resampled training set independently (no need to re-scale test)
-  X_train_smote_std, _ = scaling_std(
-      X_train_smote, X_test, numeric_columns, StandardScaler)
+  # X_train_smote_std, _ = scaling_std(
+  #     X_train_smote, X_test, numeric_columns, StandardScaler)
 
-  X_train_smotetomek_std, _ = scaling_std(
-      X_train_smotetomek, X_test, numeric_columns, StandardScaler)
+  # X_train_smotetomek_std, _ = scaling_std(
+  #     X_train_smotetomek, X_test, numeric_columns, StandardScaler)
 
-  X_train_cc_std, _ = scaling_std(
-      X_train_cc, X_test, numeric_columns, StandardScaler)
+  # X_train_cc_std, _ = scaling_std(
+  #     X_train_cc, X_test, numeric_columns, StandardScaler)
 
   print('Final train and test processing completed generated successfully')
   return X_train_std, y_train, X_train_smote_std, y_train_smote, X_train_smotetomek_std, y_train_smotetomek, X_train_cc_std, y_train_cc, X_test_std, y_test
