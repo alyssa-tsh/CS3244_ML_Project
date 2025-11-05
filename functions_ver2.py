@@ -64,20 +64,7 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import pandas as pd
 
 def encode_categories(df, col, encoding="label", unknown_label="Unknown", encoders=None):
-    """
-    Encodes or converts a categorical column in a train/test-safe way.
     
-    Parameters:
-    - df: pandas DataFrame
-    - col: column name
-    - encoding: 'label', 'onehot', 'categorical', or 'none'
-    - unknown_label: value to fill missing or unknowns
-    - encoders: dict storing fitted encoders for reuse (train -> test)
-    
-    Returns:
-    - df: updated DataFrame with new encoded columns
-    - encoders: updated encoders dictionary
-    """
     if encoders is None:
         encoders = {}
 
@@ -135,19 +122,7 @@ def encode_categories(df, col, encoding="label", unknown_label="Unknown", encode
 
 
 def encode_application_records(df, encoding_type="label", encoders=None):
-    """
-    Encodes all categorical columns in the application records.
-    Automatically reuses encoders if provided (for test data).
-
-    Parameters:
-    - df: pandas DataFrame
-    - encoding_type: 'label', 'onehot', 'categorical', or 'none'
-    - encoders: dict of fitted encoders to reuse (optional)
     
-    Returns:
-    - df: DataFrame with encoded columns
-    - encoders: updated encoders dictionary
-    """
     categorical_cols = [
         "name_income_type",
         "name_education_type",
@@ -166,9 +141,11 @@ def encode_application_records(df, encoding_type="label", encoders=None):
             encoding=encoding_type,
             encoders=encoders
         )
-    df.drop(columns=categorical_cols, inplace=True)
+    if encoding_type in ["label", "onehot"]:
+        df.drop(columns=categorical_cols, inplace=True)
 
     return df, encoders
+
 
 
 
@@ -185,10 +162,6 @@ def drop_id_dupes(df):
   return df_dropped.reset_index(drop=True)
 
 def clean_application_records(raw):
-    """
-    Cleans raw application records.
-    Supports flexible encoding options ('label', 'onehot', 'categorical', 'none').
-    """
 
     df = raw.copy()
     df.columns = df.columns.str.lower()
@@ -205,6 +178,7 @@ def clean_application_records(raw):
     # Family size
     df["cnt_fam_members"] = df["cnt_fam_members"].astype(int)
     df["cnt_fam_members_encoded"] = df["cnt_fam_members"].apply(lambda x: x if x in [1,2,3,4,5] else 6).astype(int)
+    df["cnt_fam_members_encoded"] = df["cnt_fam_members_encoded"] - df["cnt_fam_members_encoded"].min()
 
     # Age
     df["age"] = (-df["days_birth"] / 365).round(0).astype(int)
@@ -214,6 +188,7 @@ def clean_application_records(raw):
     df['age_binned'] = pd.Categorical(df['age_binned'], categories=age_labels, ordered=True)
     df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
     df['age_binned_encoded'] = df['age_binned'].cat.codes
+    df['age_binned_encoded'] = df['age_binned'].cat.codes - df['age_binned'].cat.codes.min()
 
     # Employment
     df["days_employed"] = np.where(df["days_employed"] >= 0, -1, -df["days_employed"])
