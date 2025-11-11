@@ -503,7 +503,7 @@ def oversampling_methods(X_train, y_train, random_state=42):
 # In[ ]:
 
 
-def data_pipeline_v1(encode_type):
+def data_pipeline(encode_type):
   print('Loading data')
   application_records_raw, credit_records_raw = load_data()
   print('Splitting data')
