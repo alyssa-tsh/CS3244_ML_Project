@@ -7,6 +7,7 @@
 import kagglehub
 from kagglehub import KaggleDatasetAdapter
 from  sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import re
 import numpy as np
 import pandas as pd
@@ -17,14 +18,6 @@ from itertools import filterfalse
 from sklearn.preprocessing import RobustScaler, QuantileTransformer
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.svm import SVC
-from xgboost import XGBClassifier
 from imblearn.over_sampling import SMOTE
 from imblearn.combine import SMOTETomek
 from imblearn.under_sampling import ClusterCentroids
@@ -56,12 +49,6 @@ def load_data():
 
 
 # application record clean functions
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder
-import pandas as pd
-import numpy as np
-
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder
-import pandas as pd
 
 def encode_categories(df, col, encoding="label", unknown_label="Unknown", encoders=None):
     
@@ -147,48 +134,43 @@ def encode_application_records(df, encoding_type="label", encoders=None):
     return df, encoders
 
 
+# def drop_id_dupes(df):
+#   df_sorted=df.sort_values('id')
 
+#   def keep_row(id):
+#     notna = id[id['occupation_type'].notna()]
+#     if not notna.empty:
+#       return notna.iloc[[0]] #keep first dup
+#     else:
+#       return id.iloc[[0]] #if everything is NaN, just keep first
+#   df_dropped=df_sorted.groupby('id', group_keys=False).apply(keep_row)
+#   return df_dropped.reset_index(drop=True)
 
-def drop_id_dupes(df):
-  df_sorted=df.sort_values('id')
-
-  def keep_row(id):
-    notna = id[id['occupation_type'].notna()]
-    if not notna.empty:
-      return notna.iloc[[0]] #keep first dup
-    else:
-      return id.iloc[[0]] #if everything is NaN, just keep first
-  df_dropped=df_sorted.groupby('id', group_keys=False).apply(keep_row)
-  return df_dropped.reset_index(drop=True)
-
-def clean_application_records(raw):
+def clean_application_records(raw, encoding_type="label", encoders=None):
 
     df = raw.copy()
     df.columns = df.columns.str.lower()
 
     # Handle duplicates
-    dupes_df = df[df['id'].duplicated(keep=False)].sort_values(by='id')
-    dupes_df = drop_id_dupes(dupes_df)
-    non_dupes = df[~df['id'].duplicated(keep=False)]
-    df = pd.concat([non_dupes, dupes_df], ignore_index=True)
+    df.drop_duplicates(['id'], keep='last')
 
     # ordinal encoding for cnt childen, age_binned and family size
     # Children
     df["cnt_children_encoded"] = df["cnt_children"].apply(lambda x: x if x in [0,1,2,3] else 4).astype(int)
     # Family size
     df["cnt_fam_members"] = df["cnt_fam_members"].astype(int)
-    df["cnt_fam_members_encoded"] = df["cnt_fam_members"].apply(lambda x: x if x in [1,2,3,4,5] else 6).astype(int)
-    df["cnt_fam_members_encoded"] = df["cnt_fam_members_encoded"] - df["cnt_fam_members_encoded"].min()
+    # df["cnt_fam_members_encoded"] = df["cnt_fam_members"].apply(lambda x: x if x in [1,2,3,4,5] else 6).astype(int)
+    # df["cnt_fam_members_encoded"] = df["cnt_fam_members_encoded"] - df["cnt_fam_members_encoded"].min()
 
     # Age
     df["age"] = (-df["days_birth"] / 365).round(0).astype(int)
     age_bins = list(range(0,91,5)) + [float('inf')]
     age_labels = [f"{i}-{i+4}" for i in range(0,90,5)] + ["90+"]
-    df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
-    df['age_binned'] = pd.Categorical(df['age_binned'], categories=age_labels, ordered=True)
-    df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
-    df['age_binned_encoded'] = df['age_binned'].cat.codes
-    df['age_binned_encoded'] = df['age_binned'].cat.codes - df['age_binned'].cat.codes.min()
+    # df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
+    # df['age_binned'] = pd.Categorical(df['age_binned'], categories=age_labels, ordered=True)
+    # df['age_binned'] = pd.cut(df["age"], bins=age_bins, labels=age_labels, right=False)
+    # df['age_binned_encoded'] = df['age_binned'].cat.codes
+    # df['age_binned_encoded'] = df['age_binned'].cat.codes - df['age_binned'].cat.codes.min()
 
     # Employment
     df["days_employed"] = np.where(df["days_employed"] >= 0, -1, -df["days_employed"])
@@ -200,17 +182,51 @@ def clean_application_records(raw):
 
 
     # Binary flags
-    df["gender_encoded"] = df["code_gender"].map({'M':0, 'F':1})
-    df["flag_own_realty_encoded"] = df["flag_own_realty"].map({'Y':1, 'N':0})
-    df["flag_own_car_encoded"] = df["flag_own_car"].map({'Y':1, 'N':0})
+    df["flag_gender"] = df["code_gender"].map({'M':0, 'F':1})
+    df["flag_own_realty"] = df["flag_own_realty"].map({'Y':1, 'N':0})
+    df["flag_own_car"] = df["flag_own_car"].map({'Y':1, 'N':0})
 
-    df.drop(columns=["code_gender", "flag_own_realty", "flag_own_car", "age_binned"], inplace=True)
 
     # Income
     df["amt_income_total_log"] = np.log1p(df["amt_income_total"])
+
+    # Categorical
     df["occupation_type"] = df["occupation_type"].fillna("Unemployed")
+
+    categorical_cols = [
+        "name_income_type",
+        "name_education_type",
+        "name_family_status",
+        "name_housing_type",
+        "occupation_type"
+    ]
+
+    if encoders is None:
+        encoders = {}
+
+    for col in categorical_cols:
+        df, encoders = encode_categories(
+            df,
+            col,
+            encoding=encoding_type,
+            encoders=encoders
+        )
     
-    return df
+
+    drop_col = [
+      "name_income_type"
+      , "name_education_type"
+      , "name_family_status"
+      , "name_housing_type"
+      , "occupation_type"
+      , "amt_income_total"
+      , "code_gender"
+      , "days_birth"
+      , "days_employed"]
+    df.drop(columns=drop_col, inplace=True)
+
+    return df, encoders
+    
 
 # clean credit records
 def weighted_default_prop_decay(group, decay=0.1):
@@ -313,46 +329,61 @@ def split_application_dataset(application_records_raw, old_ids, new_ids):
 
 
 # target engineering
-def create_target(df, weights=None, scaling_method = 'quantile'):
-    df = df.copy()
+# def create_target(df, weights=None, scaling_method = 'quantile'):
+#     df = df.copy()
 
-    # Metrics to include
-    metrics = ['weighted_default_prop', 'default_prop', 'weighted_default_prop_tenure_norm', 'weighted_default_prop_vintage_norm']
-    # Equal weighting to each feature
-    if weights is None:
-        weights = {metric: 1/len(metrics) for metric in metrics}
+#     # Metrics to include
+#     metrics = ['weighted_default_prop', 'default_prop', 'weighted_default_prop_tenure_norm', 'weighted_default_prop_vintage_norm']
+#     # Equal weighting to each feature
+#     if weights is None:
+#         weights = {metric: 1/len(metrics) for metric in metrics}
 
-    # A) ROBUST (does not work well)
-    if scaling_method == 'robust':
-      scaler = RobustScaler()
-      for metric in metrics:
-          df[f'{metric}_scaled'] = scaler.fit_transform(df[[metric]])
+#     # A) ROBUST (does not work well)
+#     if scaling_method == 'robust':
+#       scaler = RobustScaler()
+#       for metric in metrics:
+#           df[f'{metric}_scaled'] = scaler.fit_transform(df[[metric]])
 
-    # B) MANUAL QUANTILE CALC
-    elif scaling_method == 'manual_quantile':
-      for metric in metrics:
-        df[f'{metric}_scaled'] = df[metric].rank(pct=True)
+#     # B) MANUAL QUANTILE CALC
+#     elif scaling_method == 'manual_quantile':
+#       for metric in metrics:
+#         df[f'{metric}_scaled'] = df[metric].rank(pct=True)
 
-    # C) QUANTILE TRANSFORMER
-    else:
-      scaler = QuantileTransformer(output_distribution='uniform')
-      for metric in metrics:
-          df[f'{metric}_scaled'] = scaler.fit_transform(df[[metric]])
-
-
-
-    df['composite_risk_score'] = sum(df[f'{metric}_scaled'] * weight
-                                     for metric, weight in weights.items())
-
-    # Define threshold (80th percentile)
-    risk_threshold = df['composite_risk_score'].quantile(0.80)
-    df['multi_dim_target'] = (df['composite_risk_score'] > risk_threshold).astype(int)
-    df['customer_label'] = df['multi_dim_target'].map({0: 'Good Customer', 1: 'Bad Customer'})
-
-    return df, risk_threshold
+#     # C) QUANTILE TRANSFORMER
+#     else:
+#       scaler = QuantileTransformer(output_distribution='uniform')
+#       for metric in metrics:
+#           df[f'{metric}_scaled'] = scaler.fit_transform(df[[metric]])
 
 
-# In[ ]:
+
+#     df['composite_risk_score'] = sum(df[f'{metric}_scaled'] * weight
+#                                      for metric, weight in weights.items())
+
+#     # Define threshold (80th percentile)
+#     risk_threshold = df['composite_risk_score'].quantile(0.80)
+#     df['multi_dim_target'] = (df['composite_risk_score'] > risk_threshold).astype(int)
+#     df['customer_label'] = df['multi_dim_target'].map({0: 'Good Customer', 1: 'Bad Customer'})
+
+#     return df, risk_threshold
+
+def create_target(df, weights=None, scaling_method = 'quantile', risk_threshold = None):
+  """
+  Creates composite risk score & multi_dim_target from credit aggregates
+  Finds 80% threshold from train set, and applies it to test set
+  """
+  df = df.copy()
+
+  if risk_threshold is None:
+    risk_threshold= df['default_prop'].quantile(0.8)
+
+  df['multi_dim_target'] = (df['default_prop'] > risk_threshold).astype(int)
+
+
+  df['customer_label'] = df['multi_dim_target'].map({0: 'Good Customer', 1: 'Bad Customer'})
+
+  return df, risk_threshold
+
 
 
 # Merge cleaned application and credit datasets
@@ -377,74 +408,23 @@ def merge_data(old_credit_df, new_credit_df, old_accounts_application_df, new_ac
   return train, test
 
 
-
-# In[ ]:
-
-
 # split into x and y
 def X_y_split(train, test, target_col='label'):
-  drop_cols = ["days_birth", "amt_income_total", "days_employed", "years_employed", "cnt_fam_members", "flag_mobil"]
-  train_df = train.drop(columns=drop_cols)
-  test_df = test.drop(columns=drop_cols)
+#   drop_cols = ["days_birth", "amt_income_total", "days_employed", "years_employed", "cnt_fam_members", "flag_mobil"]
+#   train_df = train.drop(columns=drop_cols)
+#   test_df = test.drop(columns=drop_cols)
 
-  train = train_df.copy()
-  test = test_df.copy()
+  train_df = train.copy()
+  test_df  = test.copy()
 
   # train test split
-  X_train_full = train.drop(columns=[target_col])
-  y_train_full = train[target_col]
-  X_test = test.drop(columns=[target_col])
-  y_test = test[target_col]
+  X_train_full = train_df.drop(columns=[target_col])
+  y_train_full = train_df[target_col]
+  X_test = test_df.drop(columns=[target_col])
+  y_test = test_df[target_col]
   print('Completed X, y split')
   return X_train_full, y_train_full, X_test, y_test
 
-
-# In[ ]:
-
-
-# normalisation
-# encoded_columns = ['cnt_children_encoded',
-#                 'age_binned_encoded',
-#                 'cnt_fam_members_encoded',
-#                 'name_income_type_encoded',
-#                 'name_education_type_encoded',
-#                 'name_family_status_encoded',
-#                 'name_housing_type_encoded',
-#                 'occupation_type_encoded']
-
-# binary_columns = ['flag_work_phone',
-#               'flag_phone',
-#               'flag_email',
-#               'employment_status_encoded',
-#               'gender_encoded',
-#               'flag_own_realty_encoded',
-#               'flag_own_car_encoded']
-
-# numeric_columns = ['cnt_children',
-#                    'cnt_fam_members',
-#                    'age',
-#                    'months_employed',
-#                    'amt_income_total_log',
-#                    'risk_score']
-
-# def scaling_std(X_train, X_test, numeric_columns, ScalerType):
-#   X_train_scaled = X_train.copy()
-#   X_test_scaled = X_test.copy()
-
-#   scaler=ScalerType()
-
-#   X_train_numeric = X_train.loc[:,numeric_columns]
-#   scaled_train_data = scaler.fit_transform(X_train_numeric)
-#   X_test_numeric = X_test.loc[:,numeric_columns]
-#   scaled_test_data = scaler.transform(X_test_numeric)
-
-#   X_train_scaled[numeric_columns]=scaled_train_data
-#   X_test_scaled[numeric_columns]=scaled_test_data
-
-#   X_train_scaled = X_train_scaled.drop('id', axis=1)
-#   X_test_scaled = X_test_scaled.drop('id', axis=1)
-
-#   return X_train_scaled, X_test_scaled
 
 def scaling_std(X_train, X_test, numeric_columns, ScalerType):
   X_train_scaled = X_train.copy()
@@ -469,39 +449,6 @@ def scaling_std(X_train, X_test, numeric_columns, ScalerType):
   return X_train_scaled, X_test_scaled
 
 
-# In[ ]:
-
-
-# # pca
-# def dim_red(X_train_scaled, X_test_scaled):
-#   pca = PCA(n_components=9)
-#   pca.fit(X_train_scaled)
-#   X_train=pd.DataFrame(pca.transform(X_train_scaled))
-#   X_test = pd.DataFrame(pca.transform(X_test_scaled))
-#   return X_train, X_test
-
-#  X_train_pca, X_test_pca = dim_red(X_train_norm, X_test_norm)
-
-
-# In[ ]:
-
-
-# resampling
-def oversampling_methods(X_train, y_train, random_state=42):
-  smote=SMOTE(random_state=random_state)
-  X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
-
-  smotetomek = SMOTETomek(random_state=random_state)
-  X_train_smotetomek, y_train_smotetomek = smotetomek.fit_resample(X_train, y_train)
-
-  cc = ClusterCentroids(random_state=random_state)
-  X_train_cc, y_train_cc = cc.fit_resample(X_train, y_train)
-
-  return X_train_smote, y_train_smote, X_train_smotetomek, y_train_smotetomek, X_train_cc, y_train_cc
-
-
-# In[ ]:
-
 
 def data_pipeline(encode_type):
   print('Loading data')
@@ -518,14 +465,14 @@ def data_pipeline(encode_type):
 
   old_accounts_application_df, new_accounts_application_df = split_application_dataset(application_records_raw, old_ids, new_ids)
   print(f'Cleaning old accounts application records - [Length: {old_accounts_application_df.shape}]')
-  old_accounts_application_df =  clean_application_records(old_accounts_application_df)
+  old_accounts_application_df, old_encoders =  clean_application_records(old_accounts_application_df, encoding_type = encode_type)
   print(f'Cleaning new accounts appplication records, - [Length: {new_accounts_application_df.shape}]')
-  new_accounts_application_df = clean_application_records(new_accounts_application_df)
-  print('Encoding')
-  old_accounts_application_df, encoders = encode_application_records(old_accounts_application_df, encoding_type=encode_type)
-  new_accounts_application_df, _ = encode_application_records(new_accounts_application_df, encoding_type=encode_type, encoders=encoders)
-  print(f"Encoders: {encoders}")
-  print('Encoding type:', encode_type)
+  new_accounts_application_df, new_encoders = clean_application_records(new_accounts_application_df, encoding_type = encode_type)
+#   print('Encoding')
+#   old_accounts_application_df, encoders = encode_application_records(old_accounts_application_df, encoding_type=encode_type)
+#   new_accounts_application_df, _ = encode_application_records(new_accounts_application_df, encoding_type=encode_type, encoders=encoders)
+#   print(f"Encoders: {encoders}")
+#   print('Encoding type:', encode_type)
 
   print('Merging data')
   merged_train, merged_test = merge_data(old_accounts_credit, new_accounts_credit, old_accounts_application_df, new_accounts_application_df)
@@ -534,35 +481,19 @@ def data_pipeline(encode_type):
 
   X_train, y_train, X_test, y_test = X_y_split(merged_train, merged_test, target_col='label')
 
-  numeric_columns = ['cnt_children',
-                    'age',
-                    'months_employed',
-                    'amt_income_total_log',
-                    'risk_score']
-  
-  # X_train_smote, y_train_smote, X_train_smotetomek, y_train_smotetomek, X_train_cc, y_train_cc = oversampling_methods(X_train, y_train)
-  # print('Oversampling on original X_train, y_train started')
+  numeric_columns = ["amt_income_total_log"
+      , "age"
+      , "months_employed"
+      , "years_employed"
+      , "cnt_fam_members"
+      , "cnt_children"]
 
-  # FIRST: Scale original train and test (this is your reference scaler)
+
   X_train_std, X_test_std = scaling_std(
       X_train, X_test, numeric_columns, StandardScaler)
 
-  # THEN: Apply resampling to ORIGINAL X_train (before scaling)
-  # X_train_smote_std, y_train_smote, X_train_smotetomek_std, y_train_smotetomek, X_train_cc_std, y_train_cc = oversampling_methods(X_train_std, y_train)
-
-  # FINALLY: Scale each resampled training set independently (no need to re-scale test)
-  # X_train_smote_std, _ = scaling_std(
-  #     X_train_smote, X_test, numeric_columns, StandardScaler)
-
-  # X_train_smotetomek_std, _ = scaling_std(
-  #     X_train_smotetomek, X_test, numeric_columns, StandardScaler)
-
-  # X_train_cc_std, _ = scaling_std(
-  #     X_train_cc, X_test, numeric_columns, StandardScaler)
 
   print('Final train and test processing completed generated successfully')
   return X_train_std, y_train, X_test_std, y_test
 
-#usage
-# X_train_std, y_train, X_train_smote_std, y_train_smote, X_train_smotetomek_std, y_train_smotetomek, X_train_cc_std, y_train_cc, X_test_std, y_test = data_pipeline()
 
